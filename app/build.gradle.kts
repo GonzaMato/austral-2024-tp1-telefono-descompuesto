@@ -45,6 +45,7 @@ dependencies {
     implementation("org.springframework:spring-web:6.1.12")
 
     testImplementation("io.kotlintest:kotlintest-runner-junit5:3.4.2")
+    implementation("org.springframework.boot:spring-boot-starter-webflux")
 
 }
 

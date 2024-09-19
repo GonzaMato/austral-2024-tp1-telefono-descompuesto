@@ -4,27 +4,29 @@ import ar.edu.austral.inf.sd.server.api.PlayApiService
 import ar.edu.austral.inf.sd.server.api.RegisterNodeApiService
 import ar.edu.austral.inf.sd.server.api.RelayApiService
 import ar.edu.austral.inf.sd.server.api.BadRequestException
-import ar.edu.austral.inf.sd.server.model.PlayResponse
-import ar.edu.austral.inf.sd.server.model.RegisterResponse
-import ar.edu.austral.inf.sd.server.model.Signature
-import ar.edu.austral.inf.sd.server.model.Signatures
+import ar.edu.austral.inf.sd.server.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.http.MediaType
+import org.springframework.http.client.MultipartBodyBuilder
 import org.springframework.stereotype.Component
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
+import org.springframework.web.reactive.function.BodyInserters
+import org.springframework.web.reactive.function.client.WebClient
 import java.security.MessageDigest
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import kotlin.random.Random
 
 @Component
-class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
+class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService {
 
     @Value("\${server.name:nada}")
     private val myServerName: String = ""
+
     @Value("\${server.port:8080}")
     private val myServerPort: Int = 0
     private val nodes: MutableList<RegisterResponse> = mutableListOf()
@@ -60,7 +62,7 @@ class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
         val receivedLength = message.length
         if (nextNode != null) {
             // Soy un relé. busco el siguiente y lo mando
-            // @ToDo do some work here
+            sendRelayMessage(message, receivedContentType, nextNode!!, signatures)
         } else {
             // me llego algo, no lo tengo que pasar
             if (currentMessageWaiting.value == null) throw BadRequestException("no waiting message")
@@ -98,14 +100,45 @@ class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
     }
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
-        // @ToDo acá tienen que trabajar ustedes
-        val registerNodeResponse: RegisterResponse = RegisterResponse("", -1, "", "")
+        val server = WebClient.create("http://$registerHost:$registerPort")
+
+        val registerNodeRequest: RegisterRequest = RegisterRequest(myServerName, myServerPort, "GonzaMato")
+
+        val registerNodeResponse: RegisterResponse = server.post()
+            .uri("/register")
+            .bodyValue(registerNodeRequest)
+            .retrieve()
+            .bodyToMono(RegisterResponse::class.java)
+            .block()!!
+
         println("nextNode = ${registerNodeResponse}")
-        nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, uuid, hash) }
+
+        nextNode = registerNodeResponse
     }
 
-    private fun sendRelayMessage(body: String, contentType: String, relayNode: RegisterResponse, signatures: Signatures) {
-        // @ToDo acá tienen que trabajar ustedes
+    private fun sendRelayMessage(
+        body: String,
+        contentType: String,
+        relayNode: RegisterResponse,
+        signatures: Signatures
+    ) {
+        val server = WebClient.create("http://${relayNode.nextHost}:${relayNode.nextPort}")
+
+        val signedMessage = clientSign(body, contentType)
+
+        val multipartBodyBuilder = MultipartBodyBuilder()
+        multipartBodyBuilder.part("message", body)
+        multipartBodyBuilder.part("signatures", signatures.items + signedMessage)
+
+        server.post()
+            .uri("/relay")
+            .contentType(MediaType.MULTIPART_FORM_DATA)
+            .body(BodyInserters.fromMultipartData(multipartBodyBuilder.build()))
+            .retrieve()
+            .bodyToMono(Signature::class.java)
+            .subscribe { response ->
+                println("Response from server: $response")
+            }
     }
 
     private fun clientSign(message: String, contentType: String): Signature {
@@ -124,7 +157,7 @@ class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
         Signatures(listOf())
     )
 
-    private fun doHash(body: ByteArray, salt: String):  String {
+    private fun doHash(body: ByteArray, salt: String): String {
         val saltBytes = Base64.getDecoder().decode(salt)
         messageDigest.update(saltBytes)
         val digest = messageDigest.digest(body)
