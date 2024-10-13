@@ -14,7 +14,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.http.HttpEntity
+import org.springframework.http.HttpHeaders
+import org.springframework.http.MediaType
 import org.springframework.stereotype.Component
+import org.springframework.util.LinkedMultiValueMap
+import org.springframework.web.client.RestTemplate
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
 import java.security.MessageDigest
@@ -41,30 +46,40 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     private var currentMessageWaiting = MutableStateFlow<PlayResponse?>(null)
     private var currentMessageResponse = MutableStateFlow<PlayResponse?>(null)
     private var xGameTimestamp: Int = 0
+    private val timeout : Int = 10000
 
     override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): RegisterResponse {
 
         val nextNode = if (nodes.isEmpty()) {
             // es el primer nodo
-            val me = RegisterResponse(currentRequest.serverName, myServerPort, "", "")
+            val me = RegisterResponse(currentRequest.serverName, myServerPort, timeout, xGameTimestamp)
             nodes.add(me)
             me
         } else {
             nodes.last()
         }
-        val node = RegisterResponse(host!!, port!!, uuid, salt)
+        val node = RegisterResponse(host!!, port!!, timeout, xGameTimestamp)
         nodes.add(node)
 
-        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, uuid, newSalt())
+        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, nextNode.timeout, xGameTimestamp)
     }
 
     override fun relayMessage(message: String, signatures: Signatures, xGameTimestamp: Int?): Signature {
         val receivedHash = doHash(message.encodeToByteArray(), salt)
         val receivedContentType = currentRequest.getPart("message")?.contentType ?: "nada"
         val receivedLength = message.length
+        val newSignature = clientSign(message, receivedContentType)
+        val updatedSignatures = signatures.copy( signatures.items + newSignature)
+
         if (nextNode != null) {
             // Soy un relé. busco el siguiente y lo mando
-            // @ToDo do some work here
+            try {
+                sendRelayMessage(message, receivedContentType, nextNode!!, updatedSignatures)
+            } catch (e: Exception) {
+                // Error al enviar al siguiente nodo, envía al coordinador
+                sendRelayMessage(message, receivedContentType, nodes.first(), updatedSignatures)
+                throw BadRequestException("Could not relay message, fallback to coordinator") // Status 503
+            }
         } else {
             // me llego algo, no lo tengo que pasar
             if (currentMessageWaiting.value == null) throw BadRequestException("no waiting message")
@@ -102,7 +117,17 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     }
 
     override fun unregisterNode(uuid: UUID?, salt: String?): String {
-        TODO("Not yet implemented")
+        if (uuid == null || salt == null) {
+            throw BadRequestException("Invalid parameters")
+        }
+
+        val node = nodes.find { it.uuid == uuid }
+        if (node == null || node.hash != salt) {
+            throw BadRequestException("Invalid UUID or salt") // Status 400
+        }
+
+        nodes.remove(node)
+        return "Node unregistered successfully"
     }
 
     override fun reconfigure(
@@ -116,10 +141,32 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     }
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
-        // @ToDo acá tienen que trabajar ustedes
-        val registerNodeResponse: RegisterResponse = RegisterResponse("", -1, "", "")
-        println("nextNode = ${registerNodeResponse}")
-        nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, uuid, hash) }
+        try {
+            val restTemplate = RestTemplate()
+            val headers = HttpHeaders().apply {
+                contentType = MediaType.APPLICATION_JSON
+            }
+
+            val body = mapOf(
+                "host" to myServerName,
+                "port" to myServerPort,
+                "uuid" to UUID.randomUUID().toString(),
+                "salt" to salt,
+                "name" to "Node-${myServerName}:${myServerPort}"
+            )
+
+            val entity = HttpEntity(body, headers)
+            val response = restTemplate.postForEntity("http://$registerHost:$registerPort/register-node", entity, RegisterResponse::class.java)
+
+            if (response.statusCode.is2xxSuccessful) {
+                nextNode = response.body
+                println("Registered successfully: nextNode = $nextNode")
+            } else {
+                throw Exception("Failed to register to server")
+            }
+        } catch (e: Exception) {
+            println("Error during registration: ${e.message}")
+        }
     }
 
     private fun sendRelayMessage(
@@ -128,7 +175,26 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         relayNode: RegisterResponse,
         signatures: Signatures
     ) {
-        // @ToDo acá tienen que trabajar ustedes
+        try {
+            val restTemplate = RestTemplate()
+            val headers = HttpHeaders().apply {
+                set("X-Game-Timestamp", xGameTimestamp.toString())
+            }
+
+            val bodyPart = LinkedMultiValueMap<String, Any>().apply {
+                add("message", body)
+                add("signatures", signatures)
+            }
+
+            val entity = HttpEntity(bodyPart, headers)
+            val response = restTemplate.postForEntity("http://${relayNode.nextHost}:${relayNode.nextPort}/relay", entity, String::class.java)
+
+            if (!response.statusCode.is2xxSuccessful) {
+                throw Exception("Failed to relay message")
+            }
+        } catch (e: Exception) {
+            throw e // Fallar y dejar que se gestione en otro lado
+        }
     }
 
     private fun clientSign(message: String, contentType: String): Signature {
