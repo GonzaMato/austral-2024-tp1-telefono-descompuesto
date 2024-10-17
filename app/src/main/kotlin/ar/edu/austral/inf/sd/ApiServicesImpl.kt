@@ -6,10 +6,7 @@ import ar.edu.austral.inf.sd.server.api.RelayApiService
 import ar.edu.austral.inf.sd.server.api.BadRequestException
 import ar.edu.austral.inf.sd.server.api.ReconfigureApiService
 import ar.edu.austral.inf.sd.server.api.UnregisterNodeApiService
-import ar.edu.austral.inf.sd.server.model.PlayResponse
-import ar.edu.austral.inf.sd.server.model.RegisterResponse
-import ar.edu.austral.inf.sd.server.model.Signature
-import ar.edu.austral.inf.sd.server.model.Signatures
+import ar.edu.austral.inf.sd.server.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
@@ -36,7 +33,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
 
     @Value("\${server.port:8080}")
     private val myServerPort: Int = 0
-    private val nodes: MutableList<RegisterResponse> = mutableListOf()
+    private val nodes: MutableList<Node> = mutableListOf()
     private var nextNode: RegisterResponse? = null
     private val messageDigest = MessageDigest.getInstance("SHA-512")
     private val salt = Base64.getEncoder().encodeToString(Random.nextBytes(9))
@@ -50,15 +47,24 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
 
     override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): RegisterResponse {
 
+
+        val existingNode = nodes.find { it.uuid == uuid }
+        if (existingNode != null) {
+            if (existingNode.salt != salt) {
+                throw BadRequestException("Invalid UUID or salt") // Status 400
+            }
+            return RegisterResponse(existingNode.nextHost, existingNode.nextPort, existingNode.timeout, xGameTimestamp)
+        }
+
         val nextNode = if (nodes.isEmpty()) {
             // es el primer nodo
-            val me = RegisterResponse(currentRequest.serverName, myServerPort, timeout, xGameTimestamp)
+            val me = Node(currentRequest.serverName, myServerPort, timeout, xGameTimestamp, salt!!, uuid!!)
             nodes.add(me)
             me
         } else {
             nodes.last()
         }
-        val node = RegisterResponse(host!!, port!!, timeout, xGameTimestamp)
+        val node = Node(host!!, port!!, timeout, xGameTimestamp, salt!!, uuid!!)
         nodes.add(node)
 
         return RegisterResponse(nextNode.nextHost, nextNode.nextPort, nextNode.timeout, xGameTimestamp)
@@ -77,7 +83,8 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
                 sendRelayMessage(message, receivedContentType, nextNode!!, updatedSignatures)
             } catch (e: Exception) {
                 // Error al enviar al siguiente nodo, envía al coordinador
-                sendRelayMessage(message, receivedContentType, nodes.first(), updatedSignatures)
+                val registerReponseOfFirstNode = RegisterResponse(currentRequest.serverName, myServerPort, timeout, xGameTimestamp!!)
+                sendRelayMessage(message, receivedContentType, registerReponseOfFirstNode , updatedSignatures)
                 throw BadRequestException("Could not relay message, fallback to coordinator") // Status 503
             }
         } else {
@@ -105,12 +112,13 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     override fun sendMessage(body: String): PlayResponse {
         if (nodes.isEmpty()) {
             // inicializamos el primer nodo como yo mismo
-            val me = RegisterResponse(currentRequest.serverName, myServerPort, "", "")
+            val me = Node(currentRequest.serverName, myServerPort, timeout, xGameTimestamp, salt, UUID.randomUUID())
             nodes.add(me)
         }
         currentMessageWaiting.update { newResponse(body) }
         val contentType = currentRequest.contentType
-        sendRelayMessage(body, contentType, nodes.last(), Signatures(listOf()))
+        val lastNodeRegister = RegisterResponse(nodes.last().nextHost, nodes.last().nextPort, nodes.last().timeout, xGameTimestamp)
+        sendRelayMessage(body, contentType, lastNodeRegister, Signatures(listOf()))
         resultReady.await()
         resultReady = CountDownLatch(1)
         return currentMessageResponse.value!!
@@ -122,7 +130,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         }
 
         val node = nodes.find { it.uuid == uuid }
-        if (node == null || node.hash != salt) {
+        if (node == null || node.salt != salt) {
             throw BadRequestException("Invalid UUID or salt") // Status 400
         }
 
@@ -137,7 +145,16 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         nextPort: Int?,
         xGameTimestamp: Int?
     ): String {
-        TODO("Not yet implemented")
+
+        val node = nodes.find { it.uuid == uuid }
+        if (node == null || node.salt != salt) {
+            throw BadRequestException("Invalid UUID or salt") // Status 400
+        }
+
+        node.nextHost = nextHost!!
+        node.nextPort = nextPort!!
+        this.xGameTimestamp = xGameTimestamp!!
+        return "Node reconfigured successfully"
     }
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
