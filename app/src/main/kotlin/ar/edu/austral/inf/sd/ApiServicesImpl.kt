@@ -161,19 +161,24 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         try {
             val restTemplate = RestTemplate()
             val headers = HttpHeaders().apply {
-                contentType = MediaType.APPLICATION_JSON
+                contentType = MediaType.APPLICATION_FORM_URLENCODED
             }
 
-            val body = mapOf(
-                "host" to myServerName,
-                "port" to myServerPort,
-                "uuid" to UUID.randomUUID().toString(),
-                "salt" to salt,
-                "name" to "Node-${myServerName}:${myServerPort}"
-            )
+            // Create the form parameters map
+            val params = LinkedMultiValueMap<String, String>().apply {
+                add("host", myServerName)
+                add("port", myServerPort.toString())  // Convert port to String for request param
+                add("uuid", UUID.randomUUID().toString())  // Properly generate UUID
+                add("salt", salt)
+                add("name", "Node-${myServerName}:${myServerPort}")
+            }
 
-            val entity = HttpEntity(body, headers)
-            val response = restTemplate.postForEntity("http://$registerHost:$registerPort/register-node", entity, RegisterResponse::class.java)
+            val entity = HttpEntity(params, headers)
+            val response = restTemplate.postForEntity(
+                "http://$registerHost:$registerPort/register-node",
+                entity,
+                RegisterResponse::class.java
+            )
 
             if (response.statusCode.is2xxSuccessful) {
                 nextNode = response.body
