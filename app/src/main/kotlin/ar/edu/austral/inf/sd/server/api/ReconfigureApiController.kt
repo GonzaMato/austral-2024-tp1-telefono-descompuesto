@@ -34,6 +34,13 @@ class ReconfigureApiController(@Autowired(required = true) val service: Reconfig
         produces = ["application/json"]
     )
     fun reconfigure( @Valid @RequestParam(value = "uuid", required = false) uuid: java.util.UUID?, @Valid @RequestParam(value = "salt", required = false) salt: kotlin.String?, @Valid @RequestParam(value = "nextHost", required = false) nextHost: kotlin.String?, @Valid @RequestParam(value = "nextPort", required = false) nextPort: kotlin.Int?, @RequestHeader(value = "X-Game-Timestamp", required = false) xGameTimestamp: kotlin.Int?): ResponseEntity<kotlin.String> {
-        return ResponseEntity(service.reconfigure(uuid, salt, nextHost, nextPort, xGameTimestamp), HttpStatus.valueOf(200))
+        try {
+            return ResponseEntity(
+                service.reconfigure(uuid, salt, nextHost, nextPort, xGameTimestamp),
+                HttpStatus.valueOf(200)
+            )
+        } catch (e: Exception) {
+            return ResponseEntity(e.message, HttpStatus.valueOf(400))
+        }
     }
 }

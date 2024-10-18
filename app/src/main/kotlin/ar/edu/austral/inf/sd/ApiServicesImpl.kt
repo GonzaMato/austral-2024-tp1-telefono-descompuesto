@@ -19,6 +19,7 @@ import org.springframework.util.LinkedMultiValueMap
 import org.springframework.web.client.RestTemplate
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.*
 import java.util.concurrent.CountDownLatch
@@ -30,6 +31,9 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
 
     @Value("\${server.name:nada}")
     private val myServerName: String = ""
+
+    @Value("\${server.hostpropio:}")
+    private val myServerHost: String = ""
 
     @Value("\${server.port:8080}")
     private val myServerPort: Int = 0
@@ -46,7 +50,6 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     private val timeout : Int = 10000
 
     override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): RegisterResponse {
-
 
         val existingNode = nodes.find { it.uuid == uuid }
         if (existingNode != null) {
@@ -134,6 +137,36 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
             throw BadRequestException("Invalid UUID or salt") // Status 400
         }
 
+        // Reconfigurar el nodo anterior para apuntar al siguiente nodo
+        val nodeIndex = nodes.indexOf(node)
+        if (nodeIndex > 0 && nodeIndex < nodes.size - 1) {
+            val previousNode = nodes[nodeIndex - 1]
+            val nextNode = nodes[nodeIndex + 1]
+            previousNode.nextHost = nextNode.nextHost
+            previousNode.nextPort = nextNode.nextPort
+
+            val url = "http://${previousNode.nextHost}:${previousNode.nextPort}/reconfigure"
+
+            val params = mapOf(
+                "uuid" to URLEncoder.encode(nextNode.uuid.toString(), "UTF-8"),
+                "salt" to URLEncoder.encode(nextNode.salt, "UTF-8"),
+                "nextHost" to nextNode.nextHost,
+                "nextPort" to nextNode.nextPort.toString()
+            )
+
+            val restTemplate = RestTemplate()
+            val headers = HttpHeaders().apply {
+                add("X-Game-Timestamp", xGameTimestamp.toString())
+            }
+
+            val entity = HttpEntity(null, headers)
+            try {
+                restTemplate.postForEntity(url, entity, String::class.java, params)
+            } catch (e: Exception) {
+                throw BadRequestException("Failed to reconfigure next node") // Status 400
+            }
+        }
+
         nodes.remove(node)
         return "Node unregistered successfully"
     }
@@ -166,7 +199,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
 
             // Create the form parameters map
             val params = LinkedMultiValueMap<String, String>().apply {
-                add("host", myServerName)
+                add("host", myServerHost)
                 add("port", myServerPort.toString())  // Convert port to String for request param
                 add("uuid", UUID.randomUUID().toString())  // Properly generate UUID
                 add("salt", salt)
@@ -182,6 +215,8 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
 
             if (response.statusCode.is2xxSuccessful) {
                 nextNode = response.body
+                println("uuid = ${params.get("uuid")}")
+                println("salt = ${params.get("salt")}")
                 println("Registered successfully: nextNode = $nextNode")
             } else {
                 throw Exception("Failed to register to server")
