@@ -47,7 +47,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     private var currentMessageWaiting = MutableStateFlow<PlayResponse?>(null)
     private var currentMessageResponse = MutableStateFlow<PlayResponse?>(null)
     private var xGameTimestamp: Int = 0
-    private val timeout : Int = 10000
+    private val timeout: Int = 10000
 
     override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): RegisterResponse {
 
@@ -78,7 +78,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         val receivedContentType = currentRequest.getPart("message")?.contentType ?: "nada"
         val receivedLength = message.length
         val newSignature = clientSign(message, receivedContentType)
-        val updatedSignatures = signatures.copy( signatures.items + newSignature)
+        val updatedSignatures = signatures.copy(signatures.items + newSignature)
 
         if (nextNode != null) {
             // Soy un relé. busco el siguiente y lo mando
@@ -86,8 +86,9 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
                 sendRelayMessage(message, receivedContentType, nextNode!!, updatedSignatures)
             } catch (e: Exception) {
                 // Error al enviar al siguiente nodo, envía al coordinador
-                val registerReponseOfFirstNode = RegisterResponse(currentRequest.serverName, myServerPort, timeout, xGameTimestamp!!)
-                sendRelayMessage(message, receivedContentType, registerReponseOfFirstNode , updatedSignatures)
+                val registerReponseOfFirstNode =
+                    RegisterResponse(currentRequest.serverName, myServerPort, timeout, xGameTimestamp!!)
+                sendRelayMessage(message, receivedContentType, registerReponseOfFirstNode, updatedSignatures)
                 throw BadRequestException("Could not relay message, fallback to coordinator") // Status 503
             }
         } else {
@@ -120,7 +121,8 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         }
         currentMessageWaiting.update { newResponse(body) }
         val contentType = currentRequest.contentType
-        val lastNodeRegister = RegisterResponse(nodes.last().nextHost, nodes.last().nextPort, nodes.last().timeout, xGameTimestamp)
+        val lastNodeRegister =
+            RegisterResponse(nodes.last().nextHost, nodes.last().nextPort, nodes.last().timeout, xGameTimestamp)
         sendRelayMessage(body, contentType, lastNodeRegister, Signatures(listOf()))
         resultReady.await()
         resultReady = CountDownLatch(1)
@@ -140,12 +142,19 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         // Reconfigurar el nodo anterior para apuntar al siguiente nodo
         val nodeIndex = nodes.indexOf(node)
         if (nodeIndex > 0 && nodeIndex < nodes.size - 1) {
-            val previousNode = nodes[nodeIndex - 1]
-            val nextNode = nodes[nodeIndex + 1]
-            previousNode.nextHost = nextNode.nextHost
-            previousNode.nextPort = nextNode.nextPort
+            val nextNode = nodes[nodeIndex - 1]
+            val previousNode = nodes[nodeIndex + 1]
 
-            val url = "http://${previousNode.nextHost}:${previousNode.nextPort}/reconfigure"
+            println("Reconfiguring previous node: ${previousNode.uuid}")
+
+            println("Reconfiguring next node: ${nextNode.uuid}")
+
+
+            val url = "http://${previousNode.nextHost}:${previousNode.nextPort}/reconfigure?" +
+                    "uuid=${URLEncoder.encode(previousNode.uuid.toString(), "UTF-8")}&" +
+                    "salt=${URLEncoder.encode(previousNode.salt, "UTF-8")}&" +
+                    "nextHost=${nextNode.nextHost}&" +
+                    "nextPort=${nextNode.nextPort}"
 
             val params = mapOf(
                 "uuid" to URLEncoder.encode(nextNode.uuid.toString(), "UTF-8"),
@@ -159,11 +168,11 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
                 add("X-Game-Timestamp", xGameTimestamp.toString())
             }
 
-            val entity = HttpEntity(null, headers)
+            val entity = HttpEntity(params, headers)
             try {
                 restTemplate.postForEntity(url, entity, String::class.java, params)
             } catch (e: Exception) {
-                throw BadRequestException("Failed to reconfigure next node") // Status 400
+                throw BadRequestException("Failed to reconfigure next node: " + e.message) // Status 400
             }
         }
 
@@ -178,15 +187,10 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         nextPort: Int?,
         xGameTimestamp: Int?
     ): String {
-
-        val node = nodes.find { it.uuid == uuid }
-        if (node == null || node.salt != salt) {
-            throw BadRequestException("Invalid UUID or salt") // Status 400
-        }
-
-        node.nextHost = nextHost!!
-        node.nextPort = nextPort!!
-        this.xGameTimestamp = xGameTimestamp!!
+        println(nextPort)
+        println(nextHost)
+        nextNode = RegisterResponse(nextHost!!, nextPort!!, timeout, xGameTimestamp!!)
+        this.xGameTimestamp = xGameTimestamp
         return "Node reconfigured successfully"
     }
 
@@ -244,7 +248,12 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
             }
 
             val entity = HttpEntity(bodyPart, headers)
-            val response = restTemplate.postForEntity("http://${relayNode.nextHost}:${relayNode.nextPort}/relay", entity, String::class.java)
+            println("Relaying message to ${relayNode.nextHost}:${relayNode.nextPort}")
+            val response = restTemplate.postForEntity(
+                "http://${relayNode.nextHost}:${relayNode.nextPort}/relay",
+                entity,
+                String::class.java
+            )
 
             if (!response.statusCode.is2xxSuccessful) {
                 throw Exception("Failed to relay message")
@@ -280,4 +289,6 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     companion object {
         fun newSalt(): String = Base64.getEncoder().encodeToString(Random.nextBytes(9))
     }
+
+
 }
