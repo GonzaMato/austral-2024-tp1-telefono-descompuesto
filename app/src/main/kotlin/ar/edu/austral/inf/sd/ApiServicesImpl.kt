@@ -7,6 +7,8 @@ import ar.edu.austral.inf.sd.server.api.BadRequestException
 import ar.edu.austral.inf.sd.server.api.ReconfigureApiService
 import ar.edu.austral.inf.sd.server.api.UnregisterNodeApiService
 import ar.edu.austral.inf.sd.server.model.*
+import ar.edu.austral.inf.sd.server.singleton.SaltHolder
+import ar.edu.austral.inf.sd.server.singleton.UUIDHolder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
@@ -26,7 +28,10 @@ import java.util.concurrent.CountDownLatch
 import kotlin.random.Random
 
 @Component
-class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService, UnregisterNodeApiService,
+class ApiServicesImpl(
+    private val uuidHolder : UUIDHolder,
+    private val saltHolder : SaltHolder
+) : RegisterNodeApiService, RelayApiService, PlayApiService, UnregisterNodeApiService,
     ReconfigureApiService {
 
     @Value("\${server.name:nada}")
@@ -40,7 +45,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     private val nodes: MutableList<Node> = mutableListOf()
     private var nextNode: RegisterResponse? = null
     private val messageDigest = MessageDigest.getInstance("SHA-512")
-    private val salt = Base64.getEncoder().encodeToString(Random.nextBytes(9))
+    private val salt = saltHolder.salt
     private val currentRequest
         get() = (RequestContextHolder.getRequestAttributes() as ServletRequestAttributes).request
     private var resultReady = CountDownLatch(1)
@@ -116,7 +121,7 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     override fun sendMessage(body: String): PlayResponse {
         if (nodes.isEmpty()) {
             // inicializamos el primer nodo como yo mismo
-            val me = Node(currentRequest.serverName, myServerPort, timeout, xGameTimestamp, salt, UUID.randomUUID())
+            val me = Node(currentRequest.serverName, myServerPort, timeout, xGameTimestamp, salt, uuidHolder.generatedUUID)
             nodes.add(me)
         }
         currentMessageWaiting.update { newResponse(body) }
@@ -204,8 +209,8 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
             // Create the form parameters map
             val params = LinkedMultiValueMap<String, String>().apply {
                 add("host", myServerHost)
-                add("port", myServerPort.toString())  // Convert port to String for request param
-                add("uuid", UUID.randomUUID().toString())  // Properly generate UUID
+                add("port", myServerPort.toString())
+                add("uuid", uuidHolder.generatedUUID.toString())
                 add("salt", salt)
                 add("name", "Node-${myServerName}:${myServerPort}")
             }
@@ -248,7 +253,6 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
             }
 
             val entity = HttpEntity(bodyPart, headers)
-            println("Relaying message to ${relayNode.nextHost}:${relayNode.nextPort}")
             val response = restTemplate.postForEntity(
                 "http://${relayNode.nextHost}:${relayNode.nextPort}/relay",
                 entity,
